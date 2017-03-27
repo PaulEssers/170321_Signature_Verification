@@ -1,0 +1,157 @@
+---
+title: "Van der Werf - Fanconi Patients"
+author: "Paul Essers"
+date: "3/23/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message=F,warning=F,error=F)
+source("../170117_FullCV_(genes_signatures_both)/170117_ClassificationCVfunctions.R")
+```
+
+## Van der Werf 2009 Data
+
+Control vs Fanconi patient bone marrow. Is it possible to detect DNA repair defects in this tissue type?
+
+```{r}
+# Load Patient data
+load("~/Data/VanDerWerf_2009_FANC_patients/Werf2009_FANC.Rdata")
+
+expr.werf<-expr.werf[,pheno.werf$samples]
+sign.werf<-sign.werf[,pheno.werf$samples]
+row.names(sign.werf)<-alphaNumeric(row.names(sign.werf))
+
+# Load model names
+load("../170124_Xenograft_Verification_newModels/bestModels3cl_3f5foverlap.Rdata")
+selected.models<-best.models[-length(best.models)]
+sz=20
+```
+
+
+```{r}
+norm_01<-function(x){(x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T))}
+library(tidyr)
+
+fractions<-rep(0,length(selected.models))
+names(fractions)<-selected.models
+
+result<-lapply(selected.models,function(model.name){
+  message(model.name)
+  out.file=paste0("ProbPreds/vdWerf_probPreds_",model.name,sz,".Rdata")
+  if(file.exists(out.file)){load(out.file)}else{
+    ## Select a model to test on the cgp dataset
+    model.file=paste0("../IntermediateData/170117_cgp_",model.name,sz,".Rdata")
+    if(file.exists(model.file)){load(model.file)}else{
+      message(paste0("Cannot load: \n",out.file,"\n This model was probably not yet constructed"))
+    }
+    mm.ens<-mm.ens[sapply(mm.ens,function(x){length(x$coefnames)>1})]
+    if(length(mm.ens)==0){next}
+    
+    full.data<-t(rbind(expr.werf,sign.werf))
+    usedVars<-unique(as.character(unlist(sapply(mm.ens,function(mm){mm$coefnames}))))
+    message(paste0("Fraction of signature genes in data-set: ",round(mean(usedVars %in% colnames(full.data)),2)))
+    fractions[model.name]<<-mean(usedVars %in% colnames(full.data))
+    usedVars<-usedVars[!(usedVars %in% colnames(full.data))]
+    if(!is.null(usedVars)){
+      missing <-data.frame(matrix(nrow=nrow(full.data),ncol=length(usedVars),data=0,dimnames=list(row.names(full.data),usedVars)))
+      full.data<-cbind(full.data,missing)
+    }
+    
+    class(mm.ens)<-"modelEnsemble"
+    probs<-predict.modelEnsemble(mm.ens,expr.set=full.data,type = "prob")
+    row.names(probs)<-colnames(expr.werf)
+    save(probs,file=out.file)
+  }
+  probs<-apply(probs,2,norm_01)
+  probs<-as.data.frame(probs)
+  probs$Sample=row.names(probs)
+  probs<-gather(as.data.frame(probs), Signature, Prob, SensitiveMO:Resistant)
+  probs$Model=model.name
+  return(probs)
+  
+})
+result<-plyr::ldply(result,rbind)
+
+result<-merge(result,pheno.werf[,c("samples","Class")],by.x="Sample",by.y="samples",all.x=T)
+
+# load the fractions, because they are only calculated when there are no presaved probabilities
+fraction.file="ProbPreds/vdWerf_fraction.Rdata"
+if(sum(fractions)==0){load(fraction.file)}else{save(fractions,file=fraction.file)}
+
+par(mar=c(10,5,5,5))
+barplot(fractions,ylim=c(0,1),col=ifelse(fractions>0.9,"darkgreen","darkred"),main="Fraction of Signature Genes in Data",las=2)
+abline(h=0.9)
+```
+
+For some of the models, a third of the genes/signatures required are not in the dataset.
+
+## Per Individual Model
+
+```{r}
+library(ggplot2)
+p<-ggplot(result, aes(x=Model,y=Prob, fill=Class))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  geom_boxplot(position=position_dodge(0.9))+
+  facet_grid(~Signature)
+plot(p)
+```
+
+Stats:
+
+```{r}
+result$Signature<-factor(result$Signature,levels=c("Resistant","SensitiveM","SensitiveMO"))
+
+for(model in unique(result$Model)){
+  cat(paste0(model,"\n"))
+  result2<-subset(result, Model==model)
+  for(sig in levels(result2$Signature)){
+    sbset<-subset(result2,Signature==sig)
+    vt<-min(pairwise.var.test(sbset$Prob,g = sbset$Class))<0.05
+    cat(paste0(sig,":\t",round(pairwise.t.test(sbset$Prob,g = sbset$Class,pool.sd = vt)$p.value[1,1],6)),"\n")
+  }
+}
+```
+
+
+## Combined Models
+
+```{r}
+library(dplyr)
+result<-subset(result,Model %in% names(fractions[fractions>0.9]))
+sumresult<-result %>% group_by(Sample,Signature,Class) %>% summarize(Probability=mean(Prob,na.rm=T))
+
+ggplot(sumresult, aes(x=Signature,y=Probability, fill=Class))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  geom_boxplot(position=position_dodge(0.9))
+
+ggplot(sumresult, aes(x=Signature,y=Probability, colour=Class))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  geom_boxplot(position=position_dodge(0.9))+
+  geom_jitter(position=position_dodge(0.9))
+
+ggplot(sumresult, aes(x=Signature,y=Probability, colour=Class))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  geom_jitter(width=0.2)
+```
+
+## Stats
+
+
+```{r}
+sumresult$Class<-factor(sumresult$Class,levels=c("Control","Fanconi"))
+
+for(sig in unique(sumresult$Signature)){
+sbset<-subset(sumresult,Signature==sig)
+vt<-min(pairwise.var.test(sbset$Probability,g = sbset$Class))<0.05
+cat(paste0(sig,":\t",pairwise.t.test(sbset$Probability,g = sbset$Class,pool.sd = vt)$p.value[1,1]),"\n")
+}
+```
+
+# Conclusion
+
+Effect seems to be reversed...

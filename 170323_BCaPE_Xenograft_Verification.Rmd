@@ -1,0 +1,280 @@
+---
+title: "Van t Veer - BRCA status"
+author: "Paul Essers"
+date: "3/23/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("../170117_FullCV_(genes_signatures_both)/170117_ClassificationCVfunctions.R")
+```
+
+# PDX Models - Summarized
+
+```{r}
+# Load Patient data
+load("~/Data/Bruna_2016_BCaPE/BCaPE.Rdata")
+
+sum(is.na(expr.Models))
+expr.Models<-apply(expr.Models,2,function(x){x[is.na(x)]<-mean(x,na.rm=T); return(x)})
+sum(is.na(sign.Models))
+
+# table mapping symbols to ensembl IDS
+library(biomaRt)
+mart=useMart(biomart="ENSEMBL_MART_ENSEMBL",host = "www.ensembl.org")
+mart=useDataset("hsapiens_gene_ensembl", mart = mart)
+
+symbol2ensembl<-getBM(filters= "external_gene_name",attributes= c("ensembl_gene_id","external_gene_name"),values=rownames(expr.Models),mart= mart)
+
+symbol2ensembl<-subset(symbol2ensembl, external_gene_name %in% row.names(expr.Models))
+expr.Models<-expr.Models[symbol2ensembl$external_gene_name,]
+rownames(expr.Models)<-symbol2ensembl$ensembl_gene_id
+
+row.names(sign.Models)<-alphaNumeric(row.names(sign.Models))
+
+# Load model names
+load("../170124_Xenograft_Verification_newModels/bestModels3cl_3f5foverlap.Rdata")
+selected.models<-best.models[-length(best.models)]
+sz=20
+```
+
+```{r}
+norm_01<-function(x){(x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T))}
+
+library(tidyr)
+
+result<-lapply(selected.models,function(model.name){
+  message(model.name)
+  out.file=paste0("ProbPreds/BCaPE_probPreds_",model.name,sz,".Rdata")
+  if(file.exists(out.file)){load(out.file)}else{
+    ## Select a model to test on the cgp dataset
+    model.file=paste0("../IntermediateData/170117_cgp_",model.name,sz,".Rdata")
+    if(file.exists(model.file)){load(model.file)}else{
+      message(paste0("Cannot load: \n",out.file,"\n This model was probably not yet constructed"))
+    }
+    mm.ens<-mm.ens[sapply(mm.ens,function(x){length(x$coefnames)>1})]
+    if(length(mm.ens)==0){next}
+    
+    full.data<-t(rbind(expr.Models,sign.Models))
+    usedVars<-unique(as.character(unlist(sapply(mm.ens,function(mm){mm$coefnames}))))
+    message(paste0("Fraction of signature genes in data-set: ",round(mean(usedVars %in% colnames(full.data)),2)))
+    usedVars<-usedVars[!(usedVars %in% colnames(full.data))]
+    if(!is.null(usedVars)){
+      missing <-data.frame(matrix(nrow=nrow(full.data),ncol=length(usedVars),data=0,dimnames=list(row.names(full.data),usedVars)))
+      full.data<-cbind(full.data,missing)
+    }
+    
+    class(mm.ens)<-"modelEnsemble"
+    probs<-predict.modelEnsemble(mm.ens,expr.set=full.data,type = "prob")
+    row.names(probs)<-colnames(expr.Models)
+    save(probs,file=out.file)
+  }
+  probs<-apply(probs,2,norm_01)
+  probs<-as.data.frame(probs)
+  probs$Sample=row.names(probs)
+  probs<-gather(as.data.frame(probs), Signature, Prob, SensitiveMO:Resistant)
+  probs$Model=model.name
+  return(probs)
+  
+})
+result<-plyr::ldply(result,rbind)
+
+#make combined signature
+probs<-sapply(1:3,function(i){
+  rowMeans(sapply(selected.models,function(model.name){
+    message(model.name)
+    load(paste0("ProbPreds/BCaPE_probPreds_",model.name,sz,".Rdata"))
+    return(norm_01(probs[,i]))
+  }),na.rm=T)
+})
+colnames(probs)=c("Resistant","SensitiveM","SensitiveMO")
+save(probs,file="ProbPreds/BCaPE_probPreds_combined20.Rdata")
+selected.models<-c(selected.models,"combined")
+
+probs<-apply(probs,2,norm_01)
+probs<-as.data.frame(probs)
+probs$Sample=row.names(probs)
+probs<-gather(as.data.frame(probs), Signature, Prob, SensitiveMO:Resistant)
+probs$Model="combined"
+
+result<-rbind(result,probs)
+```
+
+
+
+```{r}
+# colnames(DrugResponse.Models)
+# table(DrugResponse.Models$Drug)
+
+# Olaparib Data
+ola.sens <- subset(DrugResponse.Models, Drug=="AZD2281") # AZD281=Olaparib
+row.names(ola.sens)<-ola.sens$Model
+ola.sens<-ola.sens[order(ola.sens$AUC),]
+plot(y=ola.sens$AUC,x=factor(ola.sens$Model,levels=ola.sens$Model),las=2)
+
+# Cisplatin Data
+cis.sens<- subset(DrugResponse.Models, Drug=="Cisplatin") # AZD281=Olaparib
+row.names(cis.sens)<-cis.sens$Model
+cis.sens<-cis.sens[order(cis.sens$AUC),]
+plot(y=cis.sens$AUC,x=factor(cis.sens$Model,levels=cis.sens$Model),las=2)
+
+co<-merge(ola.sens[,c("AUC"),drop=F],cis.sens[,c("AUC"),drop=F],by="row.names")
+colnames(co)<-c("Tumor","AUC.Ola","AUC.Cis")
+
+plot(co$AUC.Cis,co$AUC.Ola)
+abline(h=0.2)
+abline(v=0.25)
+co$Class<-ifelse(co$AUC.Ola>0.2 & co$AUC.Cis>0.25,"SensitiveMO",
+          ifelse(co$AUC.Ola<0.2 & co$AUC.Cis>0.25,"SensitiveM","Resistant"))
+result2<-merge(co,result,by.x="Tumor",by.y="Sample")
+```
+
+
+## 3 Class Prediction
+
+Based on a single subdivision, by eye
+
+```{r}
+library(ggplot2)
+ggplot(result2, aes(x=Signature,y=Prob, fill=factor(Class)))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  geom_boxplot(position=position_dodge(0.9))+
+  facet_wrap(~Model)
+
+
+ggplot(subset(result2, Model="combined"), aes(x=Signature,y=Prob, fill=factor(Class)))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  geom_boxplot(position=position_dodge(0.9))
+
+load("ProbPreds/BCaPE_probPreds_combined20.Rdata")
+probs<-probs[co$Tumor,]
+```
+```{r,fig.width=9,fig.height=3}
+par(mfrow=c(1,3))
+library(pROC)
+sapply(unique(co$Class),function(x){
+  rr<-roc(response=co$Class==x,predictor=probs[,x],plot=T,main=x)
+  return(rr$auc*2/2)        
+})
+```
+
+
+## AUCs per drug
+
+```{r}
+optimalCutoff_2class<-function(prob=probs[,3],comb=co,col="AUC.Ola",cutoffs=seq(0.15,0.4,0.05),plot=T){
+  require(Biobase)
+  require(pROC)
+
+  # AUCsens<-norm_01(comb[,col])
+  AUCsens<-comb[,col]
+  perf<-data.frame(sapply(cutoffs,function(c){
+    class<-factor(AUCsens>c)
+    if(length(levels(factor(class)))<2){return(0)}
+    
+    r<-roc(class,prob,direction="<")
+    c(r$auc[1]*2/2)
+  }))
+  return(max(perf))
+}
+
+performance<-t(sapply(selected.models,function(model.name){
+  message(model.name)
+  load(paste0("ProbPreds/BCaPE_probPreds_",model.name,sz,".Rdata"))
+  probs=probs[co$Tumor,]
+  cis<-optimalCutoff_2class(prob=1-probs[,1],comb=co,col="AUC.Cis")
+  ola<-optimalCutoff_2class(prob=probs[,3]  ,comb=co,col="AUC.Ola")
+  return(c(cis,ola))
+}))
+colnames(performance)<-c("Cisplatin","Olaparib")
+boxplot(performance,ylim=c(0,1))
+
+out.file="randomAUC_perDrug.Rdata"
+if(file.exists(out.file)){load(out.file)}else{
+  auc.random<-t(replicate(1000,{
+    probs<-runif(nrow(co),0,1)
+    cis<-optimalCutoff_2class(prob=probs,comb=co,col="AUC.Cis")
+    ola<-optimalCutoff_2class(prob=probs,comb=co,col="AUC.Ola")
+    return(c(cis,ola))
+  }))
+  colnames(auc.random)<-c("Cisplatin","Olaparib")
+  save(auc.random,file=out.file)
+}
+
+library(tidyr)
+library(dplyr)
+perf <- performance %>% as.data.frame() %>% as.tbl() %>% gather(drug,AUC,Cisplatin:Olaparib)
+perf$sigType="threeClass"
+rand <- auc.random %>% as.data.frame() %>% as.tbl() %>% gather(drug,AUC,Cisplatin:Olaparib)
+rand$sigType="Random"
+full<-rbind(perf,rand)
+
+ggplot(full, aes(x=drug,y=AUC, fill=sigType))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  scale_y_continuous(limits=c(0,1))+
+  geom_boxplot(position=position_dodge(0.9))+
+  geom_jitter(position=position_dodge(0.9))
+
+
+# sapply(colnames(performance),function(x){t.test(performance[,x],auc.random[,x])$p.value})
+
+
+```
+
+# PARP / BRCA status
+
+
+
+```{r}
+brca<-data.frame(Models=colnames(expr.Models))
+SNV.BRCA<-t(SNV.Models[grep("BRCA",SNV.Models$Gene),-c(1,ncol(SNV.Models))])
+colnames(SNV.BRCA)<-c("BRCA1.snv","BRCA2.snv")
+CNA.BRCA<-t(CNA.Models[grep("BRCA",CNA.Models$Symbol),-1])
+colnames(CNA.BRCA)<-c("BRCA2.cna","BRCA1.cna")
+brca<-merge(brca,merge(CNA.BRCA,SNV.BRCA,by="row.names"),by.x="Models",by.y="Row.names",all.x=T)
+brca<-data.frame(apply(brca,2,function(x){as.character(x)}),stringsAsFactors = F)
+
+brca$BRCA1.snv[grep("frameshift",brca$BRCA1.snv)]<-"Frameshift"
+brca$BRCA2.snv[grep("frameshift",brca$BRCA2.snv)]<-"Frameshift"
+brca$BRCA1.snv[grep("nonsynonymous",brca$BRCA1.snv)]<-"nonsynonymous"
+brca$BRCA2.snv[grep("nonsynonymous",brca$BRCA2.snv)]<-"nonsynonymous"
+brca$BRCA1.cna[grep("UNKNOWN",brca$BRCA1.cna)]<-NA
+brca$BRCA2.cna[grep("UNKNOWN",brca$BRCA2.cna)]<-NA
+
+brca.simple<-brca
+brca.simple$BRCA1.cna<-ifelse(brca.simple$BRCA1.cna=="LOSS",T,F)
+brca.simple$BRCA2.cna<-ifelse(brca.simple$BRCA2.cna=="LOSS",T,F)
+brca.simple$BRCA1.snv<-ifelse(brca.simple$BRCA1.snv=="NO",F,T)
+brca.simple$BRCA2.snv<-ifelse(brca.simple$BRCA2.snv=="NO",F,T)
+brca.simple$summary=rowSums(brca.simple[,2:5])>0
+table(brca.simple$summary)
+
+load("ProbPreds/BCaPE_probPreds_combined20.Rdata")
+full<-merge(brca.simple,probs,by.x="Models",by.y="row.names")
+
+library(tidyr)
+full<- full %>% as.tbl %>% gather(signature,prob,Resistant:SensitiveMO)
+
+ggplot(full, aes(x=signature,y=prob, fill=summary))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  scale_y_continuous(limits=c(0,1))+
+  geom_boxplot(position=position_dodge(0.9))+
+  geom_jitter(position=position_dodge(0.9))
+
+
+boxplot(full$SensitiveM~full$summary)
+boxplot(full$SensitiveMO~full$summary)
+boxplot(full$Resistant~full$summary)
+
+full$summary=rowSums(full[,4:5])>0
+boxplot(full$Resistant~full$summary,main="Resistant")
+boxplot(full$SensitiveM~full$summary,xlab="BRCA mutation",main="SensitiveM")
+boxplot(full$SensitiveMO~full$summary,main="SensitiveMO")
+```
+
+

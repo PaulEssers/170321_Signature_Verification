@@ -1,0 +1,130 @@
+---
+title: "Van t Veer - BRCA status"
+author: "Paul Essers"
+date: "3/23/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("../170117_FullCV_(genes_signatures_both)/170117_ClassificationCVfunctions.R")
+```
+
+## R Markdown
+
+```{r}
+# Load Patient data
+load("~/Data/VantVeer_2002_Breast/vantveer.Rdata")
+table(clinical.veer$Brca1.mutation)
+clinical.veer$BRCA=ifelse(clinical.veer$Brca1.mutation==0,"wt","mut")
+
+clinical.veer$Sample<-paste0("Sample",clinical.veer$Sample)
+colnames(expr.veer)<-sapply(colnames(expr.veer),function(x){gsub(" ","",x,fixed=T)})
+colnames(sign.veer)<-sapply(colnames(expr.veer),function(x){gsub(".","",x,fixed=T)})
+expr.veer<-expr.veer[,clinical.veer$Sample]
+sign.veer<-sign.veer[,clinical.veer$Sample]
+
+expr.veer<-apply(expr.veer,2,function(x){x[is.na(x)]<-mean(x,na.rm=T); return(x)})
+sign.veer<-apply(sign.veer,2,function(x){x[is.na(x)]<-mean(x,na.rm=T); return(x)})
+
+# Load model names
+load("../170124_Xenograft_Verification_newModels/bestModels3cl_3f5foverlap.Rdata")
+selected.models<-best.models[-length(best.models)]
+sz=20
+```
+
+
+```{r}
+norm_01<-function(x){(x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T))}
+
+library(tidyr)
+
+result<-lapply(selected.models,function(model.name){
+  message(model.name)
+  out.file=paste0("ProbPreds/veer_probPreds_",model.name,sz,".Rdata")
+  if(file.exists(out.file)){load(out.file)}else{
+    ## Select a model to test on the cgp dataset
+    model.file=paste0("../IntermediateData/170117_cgp_",model.name,sz,".Rdata")
+    if(file.exists(model.file)){load(model.file)}else{
+      message(paste0("Cannot load: \n",out.file,"\n This model was probably not yet constructed"))
+    }
+    mm.ens<-mm.ens[sapply(mm.ens,function(x){length(x$coefnames)>1})]
+    if(length(mm.ens)==0){next}
+    
+    full.data<-t(rbind(expr.veer,sign.veer))
+    usedVars<-unique(as.character(unlist(sapply(mm.ens,function(mm){mm$coefnames}))))
+    message(paste0("Fraction of signature genes in data-set: ",round(mean(usedVars %in% colnames(full.data)),2)))
+    usedVars<-usedVars[!(usedVars %in% colnames(full.data))]
+    if(!is.null(usedVars)){
+      missing <-data.frame(matrix(nrow=nrow(full.data),ncol=length(usedVars),data=0,dimnames=list(row.names(full.data),usedVars)))
+      full.data<-cbind(full.data,missing)
+    }
+    
+    class(mm.ens)<-"modelEnsemble"
+    probs<-predict.modelEnsemble(mm.ens,expr.set=full.data,type = "prob")
+    row.names(probs)<-colnames(expr.veer)
+    save(probs,file=out.file)
+  }
+  probs<-apply(probs,2,norm_01)
+  probs<-as.data.frame(probs)
+  probs$Sample=row.names(probs)
+  probs<-gather(as.data.frame(probs), Signature, Prob, SensitiveMO:Resistant)
+  probs$Model=model.name
+  return(probs)
+  
+})
+result<-plyr::ldply(result,rbind)
+
+result<-merge(result,clinical.veer[,c("Sample","BRCA")],by="Sample")
+#result<-result[,-6]
+```
+
+
+## Per Individual Model
+
+```{r}
+library(ggplot2)
+p<-ggplot(result, aes(x=Model,y=Prob, fill=BRCA))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  geom_boxplot(position=position_dodge(0.9))+
+  facet_grid(~Signature)
+plot(p)
+```
+
+
+## Combined Models
+
+```{r}
+library(dplyr)
+sumresult<-result %>% group_by(Sample,Signature,BRCA) %>% summarize(Probability=mean(Prob,na.rm=T))
+
+ggplot(sumresult, aes(x=Signature,y=Probability, fill=BRCA))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  geom_boxplot(position=position_dodge(0.9))
+
+ggplot(sumresult, aes(x=Signature,y=Probability, colour=BRCA))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  geom_boxplot(position=position_dodge(0.9))+
+  geom_jitter(position=position_dodge(0.9))
+
+ggplot(sumresult, aes(x=Signature,y=Probability, colour=BRCA))+
+  theme(axis.text.y=element_text(angle = 0, hjust = 0))+
+  theme(axis.text.x=element_text(angle = 90, hjust = 0))+
+  geom_jitter(width=0.2)
+```
+
+## Stats
+
+
+```{r}
+sumresult$BRCA<-factor(sumresult$BRCA,levels=c("wt","mut"))
+
+for(sig in unique(sumresult$Signature)){
+sbset<-subset(sumresult,Signature==sig)
+vt<-min(pairwise.var.test(sbset$Probability,g = sbset$BRCA))<0.05
+print(pairwise.t.test(sbset$Probability,g = sbset$BRCA,pool.sd = vt)$p.value)
+}
+```
